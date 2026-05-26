@@ -1,14 +1,14 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="afrivoice",
+    name="lexiafrik",
     version="1.0.0",
-    description="SDK Python pour l'API AfriVoice — transcription vocale Wolof",
+    description="SDK Python pour l'API LexiAfrik — transcription vocale Wolof",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     author="XEL SOFT AI",
     author_email="contact@xelsoftai.com",
-    url="https://github.com/xelsoftai/afrivoice-python",
+    url="https://github.com/xelsoftai/lexiafrik-python",
     packages=find_packages(),
     python_requires=">=3.8",
     install_requires=[
@@ -21,5 +21,5 @@ setup(
         "Topic :: Multimedia :: Sound/Audio :: Speech",
         "Intended Audience :: Developers",
     ],
-    keywords=["wolof", "speech-to-text", "transcription", "afrivoice", "asr"],
+    keywords=["wolof", "speech-to-text", "transcription", "lexiafrik", "asr"],
 )

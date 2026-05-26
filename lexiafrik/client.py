@@ -1,10 +1,10 @@
 """
-AfriVoice SDK — Client principal
+LexiAfrik SDK — Client principal
 
 Usage:
-    from afrivoice import AfriVoiceClient
+    from lexiafrik import LexiAfrikClient
 
-    client = AfriVoiceClient(api_key="av_votre_clé")
+    client = LexiAfrikClient(api_key="av_votre_clé")
 
     # Transcrire un fichier
     result = client.transcribe("audio.wav")
@@ -32,22 +32,22 @@ from .models import (
     SegmentResult, UsageInfo,
 )
 from .exceptions import (
-    AfriVoiceError, AuthenticationError, RateLimitError,
+    LexiAfrikError, AuthenticationError, RateLimitError,
     AudioTooLargeError, UnsupportedFormatError, TranscriptionError, APIError,
 )
 
-DEFAULT_BASE_URL = "https://api.afrivoice.xelsoftai.com"
+DEFAULT_BASE_URL = "https://api.lexiafrik.com"
 
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".webm", ".m4a", ".mp4"}
 
 
-class AfriVoiceClient:
+class LexiAfrikClient:
     """
-    Client HTTP synchrone pour l'API AfriVoice.
+    Client HTTP synchrone pour l'API LexiAfrik.
 
     Args:
-        api_key:  Clé API (commence par 'av_'). Si None, lit AFRIVOICE_API_KEY.
-        base_url: URL de base de l'API. Par défaut: https://api.afrivoice.xelsoftai.com
+        api_key:  Clé API (commence par 'av_'). Si None, lit LEXIAFRIK_API_KEY.
+        base_url: URL de base de l'API. Par défaut: https://api.lexiafrik.com
         timeout:  Timeout en secondes (défaut: 300 pour les longues transcriptions).
     """
 
@@ -57,10 +57,10 @@ class AfriVoiceClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = 300.0,
     ):
-        self.api_key = api_key or os.environ.get("AFRIVOICE_API_KEY")
+        self.api_key = api_key or os.environ.get("LEXIAFRIK_API_KEY")
         if not self.api_key:
             raise AuthenticationError(
-                "Clé API manquante. Passez api_key= ou définissez AFRIVOICE_API_KEY."
+                "Clé API manquante. Passez api_key= ou définissez LEXIAFRIK_API_KEY."
             )
 
         self.base_url = base_url.rstrip("/")
@@ -105,7 +105,7 @@ class AfriVoiceClient:
         if isinstance(audio, (str, Path)):
             path = Path(audio)
             if not path.exists():
-                raise AfriVoiceError(f"Fichier introuvable: {audio}")
+                raise LexiAfrikError(f"Fichier introuvable: {audio}")
             filename = path.name
             with open(path, "rb") as f:
                 audio_bytes = f.read()

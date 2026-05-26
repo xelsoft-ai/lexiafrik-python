@@ -1,18 +1,18 @@
 """
-AfriVoice SDK — API de transcription vocale Wolof
+LexiAfrik SDK — API de transcription vocale Wolof
 
 Usage rapide:
-    from afrivoice import AfriVoiceClient
+    from lexiafrik import LexiAfrikClient
 
-    client = AfriVoiceClient(api_key="av_votre_clé")
+    client = LexiAfrikClient(api_key="av_votre_clé")
     result = client.transcribe("audio.wav")
     print(result.text)
 """
 
-from .client import AfriVoiceClient
+from .client import LexiAfrikClient
 from .models import TranscriptionResult, URLTranscriptionResult, SegmentResult, UsageInfo
 from .exceptions import (
-    AfriVoiceError,
+    LexiAfrikError,
     AuthenticationError,
     RateLimitError,
     AudioTooLargeError,
@@ -24,12 +24,12 @@ from .exceptions import (
 __version__ = "1.0.0"
 __author__ = "XEL SOFT AI"
 __all__ = [
-    "AfriVoiceClient",
+    "LexiAfrikClient",
     "TranscriptionResult",
     "URLTranscriptionResult",
     "SegmentResult",
     "UsageInfo",
-    "AfriVoiceError",
+    "LexiAfrikError",
     "AuthenticationError",
     "RateLimitError",
     "AudioTooLargeError",

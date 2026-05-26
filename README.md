@@ -1,19 +1,19 @@
-# AfriVoice Python SDK
+# LexiAfrik Python SDK
 
-SDK Python officiel pour l'[API AfriVoice](https://afrivoice.xelsoftai.com) — transcription vocale Wolof.
+SDK Python officiel pour l'[API LexiAfrik](https://api.lexiafrik.com) — transcription vocale Wolof.
 
 ## Installation
 
 ```bash
-pip install afrivoice
+pip install lexiafrik
 ```
 
 ## Usage rapide
 
 ```python
-from afrivoice import AfriVoiceClient
+from lexiafrik import LexiAfrikClient
 
-client = AfriVoiceClient(api_key="av_votre_clé")
+client = LexiAfrikClient(api_key="av_votre_clé")
 
 # Transcrire un fichier audio
 result = client.transcribe("discours.wav")
@@ -34,17 +34,17 @@ print(f"Tier: {usage.tier} | Reste: {usage.remaining_minutes} min")
 ## Clé API via variable d'environnement
 
 ```bash
-export AFRIVOICE_API_KEY=av_votre_clé
+export LEXIAFRIK_API_KEY=av_votre_clé
 ```
 
 ```python
-client = AfriVoiceClient()  # Lit AFRIVOICE_API_KEY automatiquement
+client = LexiAfrikClient()  # Lit LEXIAFRIK_API_KEY automatiquement
 ```
 
 ## Gestion des erreurs
 
 ```python
-from afrivoice import AfriVoiceClient, RateLimitError, AuthenticationError
+from lexiafrik import LexiAfrikClient, RateLimitError, AuthenticationError
 
 try:
     result = client.transcribe("audio.wav")
@@ -57,10 +57,10 @@ except RateLimitError:
 ## Context manager
 
 ```python
-with AfriVoiceClient(api_key="av_...") as client:
+with LexiAfrikClient(api_key="av_...") as client:
     result = client.transcribe("audio.wav")
 ```
 
 ## Obtenir une clé API
 
-Rendez-vous sur [afrivoice.xelsoftai.com](https://afrivoice.xelsoftai.com) pour créer un compte.
+Rendez-vous sur [lexiafrik.com](https://lexiafrik.com) pour créer un compte.

@@ -1,4 +1,4 @@
-"""AfriVoice SDK — Modèles de réponse."""
+"""LexiAfrik SDK — Modèles de réponse."""
 
 from dataclasses import dataclass, field
 from typing import List, Optional
