@@ -21,6 +21,7 @@ Usage:
 """
 
 import os
+import time
 from pathlib import Path
 from typing import Union, Optional, BinaryIO
 from datetime import datetime
@@ -141,9 +142,14 @@ class LexiAfrikClient:
         silence_thresh_dbfs: int = -35,
         min_segment_s: float = 1.0,
         max_segment_s: float = 30.0,
+        poll_interval: float = 3.0,
+        job_timeout: float = 1800.0,
     ) -> URLTranscriptionResult:
         """
         Transcrit une vidéo depuis une URL (YouTube, etc.).
+
+        Soumet un job asynchrone (HTTP 202) puis poll automatiquement
+        GET /v1/tasks/{task_id} jusqu'à obtenir le résultat final.
 
         Args:
             url:                 URL de la vidéo.
@@ -151,9 +157,14 @@ class LexiAfrikClient:
             silence_thresh_dbfs: Seuil de silence en dBFS (défaut: -35).
             min_segment_s:       Durée min d'un segment en secondes (défaut: 1.0).
             max_segment_s:       Durée max d'un segment en secondes (défaut: 30.0).
+            poll_interval:       Secondes entre chaque poll (défaut: 3).
+            job_timeout:         Timeout total en secondes (défaut: 1800).
 
         Returns:
             URLTranscriptionResult avec les segments et le texte complet.
+
+        Raises:
+            TranscriptionError: Erreur de transcription ou timeout dépassé.
 
         Example:
             result = client.transcribe_url("https://youtube.com/watch?v=abc123")
@@ -168,34 +179,58 @@ class LexiAfrikClient:
             "min_segment_s": min_segment_s,
             "max_segment_s": max_segment_s,
         }
+
+        # Soumettre le job — l'API répond 202 immédiatement
         response = self._client.post("/v1/transcribe-url", json=payload)
-        data = self._handle_response(response)
+        if response.status_code != 202:
+            self._handle_response(response)  # lève l'exception appropriée
 
-        segments = [
-            SegmentResult(
-                index=s["index"],
-                start_s=s["start_s"],
-                end_s=s["end_s"],
-                duration_s=s["duration_s"],
-                text=s["text"],
-                inference_time_s=s["inference_time_s"],
-                rtf=s["rtf"],
+        task_id = response.json()["task_id"]
+
+        # Poller GET /v1/tasks/{task_id} jusqu'au résultat
+        deadline = time.monotonic() + job_timeout
+        while time.monotonic() < deadline:
+            resp = self._client.get(f"/v1/tasks/{task_id}")
+            data = self._handle_response(resp)
+
+            status = data["status"]
+
+            if status == "processing":
+                time.sleep(poll_interval)
+                continue
+
+            if status == "error":
+                raise TranscriptionError(data.get("error") or "Erreur de transcription.")
+
+            # status == "success"
+            segments = [
+                SegmentResult(
+                    index=s["index"],
+                    start_s=s["start_s"],
+                    end_s=s["end_s"],
+                    duration_s=s["duration_s"],
+                    text=s["text"],
+                    inference_time_s=s["inference_time_s"],
+                    rtf=s["rtf"],
+                )
+                for s in (data.get("segments") or [])
+            ]
+
+            ts = str(data.get("timestamp") or "")
+            return URLTranscriptionResult(
+                title=data.get("title") or "",
+                full_text=data.get("full_text") or "",
+                segments=segments,
+                total_duration_s=data.get("total_duration_s") or 0.0,
+                total_inference_s=data.get("total_inference_s") or 0.0,
+                mean_rtf=data.get("mean_rtf") or 0.0,
+                n_segments=data.get("n_segments") or len(segments),
+                request_id=task_id,
+                model=data.get("model") or "",
+                timestamp=datetime.fromisoformat(ts.replace("Z", "+00:00")) if ts else datetime.now(),
             )
-            for s in data.get("segments", [])
-        ]
 
-        return URLTranscriptionResult(
-            title=data["title"],
-            full_text=data["full_text"],
-            segments=segments,
-            total_duration_s=data["total_duration_s"],
-            total_inference_s=data["total_inference_s"],
-            mean_rtf=data["mean_rtf"],
-            n_segments=data["n_segments"],
-            request_id=data["request_id"],
-            model=data["model"],
-            timestamp=datetime.fromisoformat(data["timestamp"].replace("Z", "+00:00")),
-        )
+        raise TranscriptionError(f"Timeout ({job_timeout}s) atteint pour le job '{task_id}'.")
 
     # ================================================================
     # USAGE
