@@ -32,6 +32,9 @@ class SegmentResult:
     text: str
     inference_time_s: float
     rtf: float
+    # Sample rate du WAV archivé pour ce segment (natif de la source).
+    # None sur les segments antérieurs à feature-06, écrits en 16 kHz.
+    sample_rate: Optional[int] = None
 
     def __str__(self) -> str:
         return f"[{self.start_s:.1f}s → {self.end_s:.1f}s] {self.text}"
@@ -50,6 +53,8 @@ class URLTranscriptionResult:
     request_id: str
     model: str
     timestamp: datetime
+    # Sample rate natif du fichier source complet. None si inconnu.
+    sample_rate: Optional[int] = None
 
     def __str__(self) -> str:
         return self.full_text

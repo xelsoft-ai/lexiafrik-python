@@ -212,6 +212,7 @@ class LexiAfrikClient:
                     text=s["text"],
                     inference_time_s=s["inference_time_s"],
                     rtf=s["rtf"],
+                    sample_rate=s.get("sample_rate"),
                 )
                 for s in (data.get("segments") or [])
             ]
@@ -228,6 +229,7 @@ class LexiAfrikClient:
                 request_id=task_id,
                 model=data.get("model") or "",
                 timestamp=datetime.fromisoformat(ts.replace("Z", "+00:00")) if ts else datetime.now(),
+                sample_rate=data.get("sample_rate"),
             )
 
         raise TranscriptionError(f"Timeout ({job_timeout}s) atteint pour le job '{task_id}'.")
