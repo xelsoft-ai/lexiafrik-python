@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="lexiafrik",
-    version="1.1.0",
+    version="2.0.0",
     description="SDK Python pour l'API LexiAfrik — transcription vocale Wolof",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",

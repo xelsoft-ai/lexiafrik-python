@@ -1,46 +1,85 @@
 """
 LexiAfrik SDK — Client principal
 
-Usage:
     from lexiafrik import LexiAfrikClient
 
-    client = LexiAfrikClient(api_key="av_votre_clé")
+    client = LexiAfrikClient()                  # clé : api_key=, LEXIAFRIK_API_KEY ou `lexiafrik login`
 
-    # Transcrire un fichier
-    result = client.transcribe("audio.wav")
+    result = client.transcribe("discours.wav", language="wo")       # fichier court (≤ 50 Mo)
     print(result.text)
 
-    # Transcrire depuis YouTube
-    result = client.transcribe_url("https://youtube.com/watch?v=...")
+    result = client.transcribe_large("conference.mp4")              # gros fichier ou vidéo
     for seg in result.segments:
         print(seg)
 
-    # Consulter l'utilisation
-    usage = client.get_usage()
-    print(f"Reste: {usage.remaining_minutes} min")
+    print(client.get_account().available_minutes, "min disponibles")
 """
 
+import mimetypes
 import os
 import time
-from pathlib import Path
-from typing import Union, Optional, BinaryIO
 from datetime import datetime
+from pathlib import Path
+from typing import BinaryIO, Callable, Iterator, List, Optional, Union
 
 import httpx
 
-from .auth import load_credentials
-from .models import (
-    TranscriptionResult, URLTranscriptionResult,
-    SegmentResult, UsageInfo,
-)
+from .auth import DEFAULT_BASE_URL, load_credentials
 from .exceptions import (
-    LexiAfrikError, AuthenticationError, RateLimitError,
-    AudioTooLargeError, UnsupportedFormatError, TranscriptionError, APIError,
+    APIError, AudioTooLargeError, AuthenticationError, LexiAfrikError, NotFoundError,
+    QuotaExceededError, RateLimitError, TranscriptionError, UnsupportedFormatError,
+)
+from .models import (
+    AccountInfo, Language, SegmentResult, TranscriptionPage, TranscriptionResult,
+    TranscriptionSummary,
 )
 
-DEFAULT_BASE_URL = "https://api.lexiafrik.com"
+_CHUNK = 1024 * 1024
 
-AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".webm", ".m4a", ".mp4"}
+
+def _parse_dt(value) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _segments(raw) -> List[SegmentResult]:
+    return [
+        SegmentResult(
+            index=s["index"], start_s=s["start_s"], end_s=s["end_s"], duration_s=s["duration_s"],
+            text=s.get("text") or "", inference_time_s=s.get("inference_time_s") or 0.0,
+            rtf=s.get("rtf") or 0.0, sample_rate=s.get("sample_rate"), audio_url=s.get("audio_url"),
+        )
+        for s in (raw or [])
+    ]
+
+
+def _result(data: dict, request_id: str) -> TranscriptionResult:
+    segs = _segments(data.get("segments"))
+    return TranscriptionResult(
+        request_id=request_id,
+        text=data.get("full_text") or "",
+        language=data.get("language"),
+        duration_s=data.get("total_duration_s") or 0.0,
+        n_segments=data.get("n_segments") or len(segs),
+        segments=segs,
+        title=data.get("title"),
+        audio_url=data.get("audio_url"),
+        sample_rate=data.get("sample_rate"),
+        timestamp=_parse_dt(data.get("timestamp")),
+    )
+
+
+def _file_chunks(path: Path) -> Iterator[bytes]:
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(_CHUNK)
+            if not chunk:
+                return
+            yield chunk
 
 
 class LexiAfrikClient:
@@ -52,7 +91,8 @@ class LexiAfrikClient:
                   `lexiafrik login` (~/.lexiafrik/credentials.json).
         base_url: URL de base de l'API. Par défaut : LEXIAFRIK_BASE_URL, sinon celle de
                   la connexion enregistrée, sinon https://api.lexiafrik.com
-        timeout:  Timeout en secondes (défaut: 300 pour les longues transcriptions).
+        timeout:  Délai par requête, en secondes (défaut : 300).
+        transport: Transport httpx personnalisé (tests).
     """
 
     def __init__(
@@ -60,6 +100,7 @@ class LexiAfrikClient:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: float = 300.0,
+        transport: Optional[httpx.BaseTransport] = None,
     ):
         saved = None
         self.api_key = api_key or os.environ.get("LEXIAFRIK_API_KEY")
@@ -76,247 +117,287 @@ class LexiAfrikClient:
                     or (saved or {}).get("base_url") or DEFAULT_BASE_URL)
         self.base_url = base_url.rstrip("/")
         self._client = httpx.Client(
-            base_url=self.base_url,
-            headers={"X-API-Key": self.api_key},
-            timeout=timeout,
+            base_url=self.base_url, headers={"X-API-Key": self.api_key},
+            timeout=timeout, transport=transport,
         )
+        # Envoi des fichiers vers le stockage : sans la clé API (URL signée).
+        self._storage = httpx.Client(timeout=timeout, transport=transport)
 
     # ================================================================
-    # TRANSCRIPTION FICHIER
+    # FICHIER COURT (réponse immédiate)
     # ================================================================
 
     def transcribe(
         self,
         audio: Union[str, Path, bytes, BinaryIO],
         filename: str = "audio.wav",
+        language: Optional[str] = None,
+        include_segments: bool = False,
+        keep_audio: bool = True,
     ) -> TranscriptionResult:
         """
-        Transcrit un fichier audio en Wolof.
+        Transcrit un fichier audio (50 Mo maximum) et renvoie le résultat directement.
+        Pour un fichier plus gros ou une vidéo, utilisez transcribe_large().
 
         Args:
-            audio:    Chemin vers le fichier (str/Path), bytes bruts, ou file-like object.
-            filename: Nom du fichier (utilisé pour l'extension). Ignoré si audio est un chemin.
-
-        Returns:
-            TranscriptionResult avec le texte et les métriques.
+            audio:            Chemin (str/Path), octets bruts ou fichier ouvert en binaire.
+            filename:         Nom du fichier (son extension compte). Ignoré pour un chemin.
+            language:         Langue de l'audio : `wo`, `wo-SN`, `ha`, `fr`… (voir list_languages()).
+                              Défaut côté API : wolof.
+            include_segments: Renvoie aussi les segments horodatés.
+            keep_audio:       False : seul le texte est conservé, pas l'audio.
 
         Raises:
-            AuthenticationError: Clé invalide (401)
-            RateLimitError: Limite dépassée (429)
-            AudioTooLargeError: Fichier trop volumineux (413)
-            UnsupportedFormatError: Format non supporté (415)
-            TranscriptionError: Erreur de transcription (422)
-            APIError: Autre erreur serveur
+            AuthenticationError, QuotaExceededError (402), AudioTooLargeError (413),
+            UnsupportedFormatError (415), TranscriptionError (422), APIError.
 
         Example:
-            result = client.transcribe("discours.wav")
+            result = client.transcribe("discours.wav", language="wo", include_segments=True)
             print(result.text)
-            print(f"Durée: {result.duration_s}s, RTF: {result.rtf}")
         """
         if isinstance(audio, (str, Path)):
             path = Path(audio)
-            if not path.exists():
+            if not path.is_file():
                 raise LexiAfrikError(f"Fichier introuvable: {audio}")
             filename = path.name
-            with open(path, "rb") as f:
-                audio_bytes = f.read()
+            content = path.read_bytes()
         elif isinstance(audio, bytes):
-            audio_bytes = audio
+            content = audio
         else:
-            audio_bytes = audio.read()
+            content = audio.read()
 
-        files = {"file": (filename, audio_bytes, "audio/wav")}
-        response = self._client.post("/v1/transcribe", files=files)
-        data = self._handle_response(response)
-
-        t = data["transcription"]
-        return TranscriptionResult(
-            text=t["text"],
-            duration_s=t["duration_s"],
-            inference_time_s=t["inference_time_s"],
-            rtf=t["rtf"],
-            n_tokens=t["n_tokens"],
-            request_id=data["request_id"],
-            model=data["model"],
-            timestamp=datetime.fromisoformat(data["timestamp"].replace("Z", "+00:00")),
-        )
+        ctype = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        form = {"include_segments": str(include_segments).lower(), "keep_audio": str(keep_audio).lower()}
+        if language:
+            form["language"] = language
+        data = self._handle_response(self._client.post(
+            "/v1/transcribe", files={"file": (filename, content, ctype)}, data=form))
+        return _result(data, data.get("request_id", ""))
 
     # ================================================================
-    # TRANSCRIPTION URL
+    # GROS FICHIERS, VIDÉOS, LIENS (job asynchrone)
     # ================================================================
 
-    def transcribe_url(
-        self,
-        url: str,
-        min_silence_ms: int = 500,
-        silence_thresh_dbfs: int = -35,
-        min_segment_s: float = 1.0,
-        max_segment_s: float = 30.0,
-        poll_interval: float = 3.0,
-        job_timeout: float = 1800.0,
-    ) -> URLTranscriptionResult:
+    def upload(self, file: Union[str, Path], content_type: Optional[str] = None) -> str:
         """
-        Transcrit une vidéo depuis une URL (YouTube, etc.).
+        Envoie un fichier audio ou vidéo directement vers le stockage (il ne transite pas par l'API)
+        et renvoie son `upload_key`, à passer à transcribe_url(upload_key=...).
+        """
+        path = Path(file)
+        if not path.is_file():
+            raise LexiAfrikError(f"Fichier introuvable: {file}")
+        ctype = content_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        size = path.stat().st_size
 
-        Soumet un job asynchrone (HTTP 202) puis poll automatiquement
-        GET /v1/tasks/{task_id} jusqu'à obtenir le résultat final.
+        slot = self._handle_response(self._client.post(
+            "/v1/uploads", json={"filename": path.name, "content_type": ctype}))
+        max_mb = slot.get("max_size_mb")
+        if max_mb and size > max_mb * 1024 * 1024:
+            raise AudioTooLargeError(
+                f"Fichier de {size / 1024 / 1024:.0f} Mo : votre offre accepte {max_mb} Mo au maximum.")
 
-        Args:
-            url:                 URL de la vidéo.
-            min_silence_ms:      Silence min pour couper (ms, défaut: 500).
-            silence_thresh_dbfs: Seuil de silence en dBFS (défaut: -35).
-            min_segment_s:       Durée min d'un segment en secondes (défaut: 1.0).
-            max_segment_s:       Durée max d'un segment en secondes (défaut: 30.0).
-            poll_interval:       Secondes entre chaque poll (défaut: 3).
-            job_timeout:         Timeout total en secondes (défaut: 1800).
+        headers = {**(slot.get("headers") or {}), "Content-Length": str(size)}
+        resp = self._storage.request(slot.get("method", "PUT"), slot["upload_url"],
+                                     headers=headers, content=_file_chunks(path))
+        if resp.status_code >= 300:
+            raise APIError(f"Échec de l'envoi du fichier (HTTP {resp.status_code}).", status_code=resp.status_code)
+        return slot["upload_key"]
 
-        Returns:
-            URLTranscriptionResult avec les segments et le texte complet.
+    def start_transcription(
+        self,
+        url: Optional[str] = None,
+        *,
+        upload_key: Optional[str] = None,
+        language: Optional[str] = None,
+        title: Optional[str] = None,
+        keep_audio: bool = True,
+        webhook_url: Optional[str] = None,
+    ) -> str:
+        """Lance un job asynchrone (lien direct `url` ou `upload_key`) et renvoie son `task_id`."""
+        if bool(url) == bool(upload_key):
+            raise LexiAfrikError("Fournissez soit url=, soit upload_key=.")
+        payload = {"keep_audio": keep_audio, "include_segments": True}
+        for k, v in (("url", url), ("upload_key", upload_key), ("language", language),
+                     ("title", title), ("webhook_url", webhook_url)):
+            if v:
+                payload[k] = v
+        return self._handle_response(self._client.post("/v1/transcribe-url", json=payload))["task_id"]
+
+    def get_task(self, task_id: str) -> dict:
+        """État brut d'un job : `status` vaut processing, success ou error."""
+        return self._handle_response(self._client.get(f"/v1/tasks/{task_id}"))
+
+    def wait_for_task(
+        self,
+        task_id: str,
+        poll_interval: float = 3.0,
+        job_timeout: float = 3600.0,
+        on_progress: Optional[Callable[[int], None]] = None,
+    ) -> TranscriptionResult:
+        """
+        Attend la fin d'un job. `on_progress(n)` est appelé avec le nombre de segments déjà
+        transcrits à chaque interrogation.
 
         Raises:
-            TranscriptionError: Erreur de transcription ou timeout dépassé.
-
-        Example:
-            result = client.transcribe_url("https://youtube.com/watch?v=abc123")
-            print(result.full_text)
-            for seg in result.segments:
-                print(f"[{seg.start_s:.1f}s] {seg.text}")
+            TranscriptionError: job en échec, ou délai dépassé.
         """
-        payload = {
-            "url": url,
-            "min_silence_ms": min_silence_ms,
-            "silence_thresh_dbfs": silence_thresh_dbfs,
-            "min_segment_s": min_segment_s,
-            "max_segment_s": max_segment_s,
-        }
-
-        # Soumettre le job — l'API répond 202 immédiatement
-        response = self._client.post("/v1/transcribe-url", json=payload)
-        if response.status_code != 202:
-            self._handle_response(response)  # lève l'exception appropriée
-
-        task_id = response.json()["task_id"]
-
-        # Poller GET /v1/tasks/{task_id} jusqu'au résultat
         deadline = time.monotonic() + job_timeout
         while time.monotonic() < deadline:
             resp = self._client.get(f"/v1/tasks/{task_id}")
             data = self._handle_response(resp)
-
-            status = data["status"]
-
-            if status == "processing":
-                time.sleep(poll_interval)
-                continue
-
+            status = data.get("status")
+            if status == "success":
+                return _result(data, task_id)
             if status == "error":
                 raise TranscriptionError(data.get("error") or "Erreur de transcription.")
+            if on_progress:
+                on_progress(len(data.get("segments") or []))
+            try:
+                wait = float(resp.headers.get("Retry-After") or poll_interval)
+            except ValueError:
+                wait = poll_interval
+            time.sleep(max(wait, 0.0))
+        raise TranscriptionError(f"Délai de {job_timeout:.0f}s dépassé pour la tâche '{task_id}'.")
 
-            # status == "success"
-            segments = [
-                SegmentResult(
-                    index=s["index"],
-                    start_s=s["start_s"],
-                    end_s=s["end_s"],
-                    duration_s=s["duration_s"],
-                    text=s["text"],
-                    inference_time_s=s["inference_time_s"],
-                    rtf=s["rtf"],
-                    sample_rate=s.get("sample_rate"),
-                )
-                for s in (data.get("segments") or [])
-            ]
-
-            ts = str(data.get("timestamp") or "")
-            return URLTranscriptionResult(
-                title=data.get("title") or "",
-                full_text=data.get("full_text") or "",
-                segments=segments,
-                total_duration_s=data.get("total_duration_s") or 0.0,
-                total_inference_s=data.get("total_inference_s") or 0.0,
-                mean_rtf=data.get("mean_rtf") or 0.0,
-                n_segments=data.get("n_segments") or len(segments),
-                request_id=task_id,
-                model=data.get("model") or "",
-                timestamp=datetime.fromisoformat(ts.replace("Z", "+00:00")) if ts else datetime.now(),
-                sample_rate=data.get("sample_rate"),
-            )
-
-        raise TranscriptionError(f"Timeout ({job_timeout}s) atteint pour le job '{task_id}'.")
-
-    # ================================================================
-    # USAGE
-    # ================================================================
-
-    def get_usage(self) -> UsageInfo:
+    def transcribe_url(
+        self,
+        url: Optional[str] = None,
+        *,
+        upload_key: Optional[str] = None,
+        language: Optional[str] = None,
+        title: Optional[str] = None,
+        keep_audio: bool = True,
+        poll_interval: float = 3.0,
+        job_timeout: float = 3600.0,
+        on_progress: Optional[Callable[[int], None]] = None,
+    ) -> TranscriptionResult:
         """
-        Consulte la consommation de votre clé API.
+        Transcrit un fichier audio/vidéo accessible par un lien direct (`url`, http ou https)
+        ou déjà envoyé (`upload_key`), et attend le résultat. Les liens de plateformes de
+        streaming (YouTube, TikTok…) ne sont pas acceptés.
+        """
+        task_id = self.start_transcription(url, upload_key=upload_key, language=language,
+                                           title=title, keep_audio=keep_audio)
+        return self.wait_for_task(task_id, poll_interval, job_timeout, on_progress)
 
-        Returns:
-            UsageInfo avec les compteurs du jour et les totaux.
+    def transcribe_large(
+        self,
+        file: Union[str, Path],
+        language: Optional[str] = None,
+        title: Optional[str] = None,
+        keep_audio: bool = True,
+        poll_interval: float = 3.0,
+        job_timeout: float = 3600.0,
+        on_progress: Optional[Callable[[int], None]] = None,
+    ) -> TranscriptionResult:
+        """
+        Transcrit un gros fichier ou une vidéo : envoi direct, job asynchrone, attente du résultat.
 
         Example:
-            usage = client.get_usage()
-            print(f"Tier: {usage.tier}")
-            print(f"Aujourd'hui: {usage.today_requests} requêtes")
-            print(f"Audio restant: {usage.remaining_minutes} min")
+            result = client.transcribe_large("conference.mp4", language="wo",
+                                             on_progress=lambda n: print(n, "segments"))
+            print(result.text)
         """
-        response = self._client.get("/v1/usage")
-        data = self._handle_response(response)
+        path = Path(file)
+        key = self.upload(path)
+        return self.transcribe_url(upload_key=key, language=language, title=title or path.name,
+                                   keep_audio=keep_audio, poll_interval=poll_interval,
+                                   job_timeout=job_timeout, on_progress=on_progress)
 
-        return UsageInfo(
-            api_key_name=data["api_key_name"],
-            tier=data["tier"],
-            today_requests=data["today_requests"],
-            today_audio_seconds=data["today_audio_seconds"],
-            daily_limit_seconds=data["daily_limit_seconds"],
-            remaining_seconds=data["remaining_seconds"],
-            total_requests=data["total_requests"],
-            total_audio_seconds=data["total_audio_seconds"],
-            member_since=data["member_since"],
+    # ================================================================
+    # LANGUES, COMPTE, HISTORIQUE
+    # ================================================================
+
+    def list_languages(self) -> List[Language]:
+        """Langues disponibles (route publique)."""
+        data = self._handle_response(self._client.get("/v1/languages"))
+        return [Language(code=l["code"], name=l["name"], aliases=l.get("aliases") or [])
+                for l in data.get("languages", [])]
+
+    def get_account(self) -> AccountInfo:
+        """Offre, quota mensuel restant et crédit du compte."""
+        d = self._handle_response(self._client.get("/v1/billing/account"))
+        return AccountInfo(
+            plan=d["plan"], plan_name=d.get("plan_name") or d["plan"],
+            quota_seconds=d.get("quota_seconds"), used_seconds=d.get("used_seconds") or 0.0,
+            quota_remaining_seconds=d.get("quota_remaining_seconds"),
+            wallet_usd=d.get("wallet_usd") or 0.0, wallet_minutes=d.get("wallet_minutes") or 0.0,
+            period_end=str(d["period_end"]) if d.get("period_end") else None,
+            wallet_expires_at=str(d["wallet_expires_at"]) if d.get("wallet_expires_at") else None,
+            features=d.get("features") or {},
         )
 
-    # ================================================================
-    # HEALTH
-    # ================================================================
+    # Nom du SDK 1.x : les limites journalières n'existent plus, l'offre et le quota mensuel les remplacent.
+    get_usage = get_account
+
+    def list_transcriptions(self, page: int = 1, page_size: int = 20,
+                            status: Optional[str] = None) -> TranscriptionPage:
+        """Historique de vos transcriptions, de la plus récente à la plus ancienne."""
+        params = {"page": page, "page_size": page_size}
+        if status:
+            params["status"] = status
+        d = self._handle_response(self._client.get("/v1/transcriptions", params=params))
+        items = [
+            TranscriptionSummary(
+                request_id=r["request_id"], status=r.get("status") or "", text=r.get("text"),
+                title=r.get("source_title"), language=r.get("language"), duration_s=r.get("duration_s"),
+                timestamp=str(r["timestamp"]) if r.get("timestamp") else None,
+                error=r.get("error_message"), tags=r.get("tags") or [],
+            )
+            for r in d.get("items", [])
+        ]
+        return TranscriptionPage(items=items, total=d.get("total", len(items)), page=page, page_size=page_size)
+
+    def get_transcription(self, request_id: str) -> dict:
+        """Détail d'une transcription (texte, segments, corrections) tel que renvoyé par l'API."""
+        return self._handle_response(self._client.get(f"/v1/transcriptions/{request_id}"))
+
+    def delete_transcription(self, request_id: str) -> None:
+        """Supprime une transcription et ses fichiers (irréversible)."""
+        self._handle_response(self._client.delete(f"/v1/transcriptions/{request_id}"))
 
     def health(self) -> dict:
         """Vérifie que l'API est opérationnelle."""
-        response = self._client.get("/health")
-        return self._handle_response(response)
+        return self._handle_response(self._client.get("/health"))
 
     # ================================================================
-    # INTERNAL
+    # INTERNE
     # ================================================================
 
     def _handle_response(self, response: httpx.Response) -> dict:
-        """Convertit la réponse HTTP en dict ou lève une exception appropriée."""
-        if response.status_code == 200:
-            return response.json()
+        """Convertit la réponse HTTP en dict ou lève l'exception appropriée."""
+        if response.status_code < 300:
+            return response.json() if response.content else {}
 
         try:
-            detail = response.json().get("detail", response.text)
+            body = response.json()
+            detail = body.get("detail") or body.get("error") or response.text
         except Exception:
             detail = response.text
+        if isinstance(detail, list):  # erreur de validation (422)
+            detail = "; ".join(str(d.get("msg", d)) if isinstance(d, dict) else str(d) for d in detail)
 
-        if response.status_code == 401:
-            raise AuthenticationError(detail)
-        elif response.status_code == 403:
-            raise AuthenticationError(f"Accès refusé: {detail}")
-        elif response.status_code == 413:
+        code = response.status_code
+        if code in (401, 403):
+            raise AuthenticationError(detail if code == 401 else f"Accès refusé: {detail}")
+        if code == 402:
+            raise QuotaExceededError(detail)
+        if code == 404:
+            raise NotFoundError(detail)
+        if code == 413:
             raise AudioTooLargeError(detail)
-        elif response.status_code == 415:
+        if code == 415:
             raise UnsupportedFormatError(detail)
-        elif response.status_code == 422:
+        if code == 422:
             raise TranscriptionError(detail)
-        elif response.status_code == 429:
+        if code == 429:
             raise RateLimitError(detail)
-        else:
-            raise APIError(detail, status_code=response.status_code)
+        raise APIError(detail, status_code=code)
 
     def close(self):
-        """Ferme le client HTTP."""
+        """Ferme les connexions HTTP."""
         self._client.close()
+        self._storage.close()
 
     def __enter__(self):
         return self
