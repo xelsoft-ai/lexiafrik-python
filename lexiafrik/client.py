@@ -28,6 +28,7 @@ from datetime import datetime
 
 import httpx
 
+from .auth import load_credentials
 from .models import (
     TranscriptionResult, URLTranscriptionResult,
     SegmentResult, UsageInfo,
@@ -47,23 +48,32 @@ class LexiAfrikClient:
     Client HTTP synchrone pour l'API LexiAfrik.
 
     Args:
-        api_key:  Clé API (commence par 'av_'). Si None, lit LEXIAFRIK_API_KEY.
-        base_url: URL de base de l'API. Par défaut: https://api.lexiafrik.com
+        api_key:  Clé API. Si None : LEXIAFRIK_API_KEY, sinon la clé enregistrée par
+                  `lexiafrik login` (~/.lexiafrik/credentials.json).
+        base_url: URL de base de l'API. Par défaut : LEXIAFRIK_BASE_URL, sinon celle de
+                  la connexion enregistrée, sinon https://api.lexiafrik.com
         timeout:  Timeout en secondes (défaut: 300 pour les longues transcriptions).
     """
 
     def __init__(
         self,
         api_key: Optional[str] = None,
-        base_url: str = DEFAULT_BASE_URL,
+        base_url: Optional[str] = None,
         timeout: float = 300.0,
     ):
+        saved = None
         self.api_key = api_key or os.environ.get("LEXIAFRIK_API_KEY")
         if not self.api_key:
+            saved = load_credentials()
+            self.api_key = saved["api_key"] if saved else None
+        if not self.api_key:
             raise AuthenticationError(
-                "Clé API manquante. Passez api_key= ou définissez LEXIAFRIK_API_KEY."
+                "Clé API manquante. Passez api_key=, définissez LEXIAFRIK_API_KEY "
+                "ou lancez `lexiafrik login`."
             )
 
+        base_url = (base_url or os.environ.get("LEXIAFRIK_BASE_URL")
+                    or (saved or {}).get("base_url") or DEFAULT_BASE_URL)
         self.base_url = base_url.rstrip("/")
         self._client = httpx.Client(
             base_url=self.base_url,

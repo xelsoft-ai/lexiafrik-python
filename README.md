@@ -31,6 +31,29 @@ usage = client.get_usage()
 print(f"Tier: {usage.tier} | Reste: {usage.remaining_minutes} min")
 ```
 
+## Se connecter depuis le terminal
+
+```bash
+pip install lexiafrik
+lexiafrik login      # affiche un code, ouvre le navigateur, enregistre une clé
+lexiafrik whoami     # clé enregistrée et offre
+lexiafrik logout     # supprime les identifiants et révoque la clé de ce terminal
+```
+
+`lexiafrik login` n'utilise ni mot de passe ni clé à copier : vous vous connectez sur
+lexiafrik.com (email, mot de passe ou Google), vérifiez le code affiché dans le terminal
+et approuvez. Une clé API dédiée à ce terminal est alors créée sur votre compte et
+enregistrée dans `~/.lexiafrik/credentials.json` (lisible par vous seul). Vous pouvez la
+révoquer à tout moment depuis **lexiafrik.com > Clés API**. Ensuite :
+
+```python
+client = LexiAfrikClient()   # retrouve la clé enregistrée
+```
+
+Ordre de recherche de la clé : paramètre `api_key=`, variable `LEXIAFRIK_API_KEY`, puis
+fichier enregistré par `lexiafrik login`. Sur un serveur ou en CI, préférez une clé créée
+sur le site et la variable d'environnement.
+
 ## Clé API via variable d'environnement
 
 ```bash
