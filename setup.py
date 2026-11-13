@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
     name="lexiafrik",
     version="2.0.0",
-    description="SDK Python et ligne de commande pour LexiAfrik : transcription vocale des langues africaines",
+    description="Python SDK and command line for LexiAfrik: speech-to-text for African languages",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     license="MIT",
