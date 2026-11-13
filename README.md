@@ -104,6 +104,10 @@ No external network and no real key needed.
 
 Create an account on [lexiafrik.com](https://lexiafrik.com), or run `lexiafrik login`.
 
+## Releasing
+
+Maintainers: see [RELEASING.md](RELEASING.md) and [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
