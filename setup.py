@@ -6,6 +6,8 @@ setup(
     description="SDK Python et ligne de commande pour LexiAfrik : transcription vocale des langues africaines",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
+    license="MIT",
+    license_files=["LICENSE"],
     author="XEL SOFT AI",
     author_email="contact@xelsoftai.com",
     url="https://lexiafrik.com",
