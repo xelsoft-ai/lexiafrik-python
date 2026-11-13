@@ -1,7 +1,9 @@
 # LexiAfrik Python SDK
 
-SDK Python officiel pour l'[API LexiAfrik](https://docs.lexiafrik.com) — transcription vocale du wolof
-et d'autres langues africaines. Documentation complète : **https://docs.lexiafrik.com**
+Official Python SDK and command line for the [LexiAfrik API](https://docs.lexiafrik.com): speech-to-text for
+Wolof and 30+ other African languages. Full documentation: **https://docs.lexiafrik.com**
+
+🇫🇷 [Version française](https://github.com/xelsoft-ai/lexiafrik-python/blob/main/README.fr.md)
 
 ## Installation
 
@@ -9,24 +11,23 @@ et d'autres langues africaines. Documentation complète : **https://docs.lexiafr
 pip install lexiafrik
 ```
 
-Python 3.8 ou plus récent.
+Python 3.8 or newer.
 
-## Se connecter depuis le terminal
+## Sign in from the terminal
 
 ```bash
-lexiafrik login      # affiche un code, ouvre le navigateur, enregistre une clé
-lexiafrik whoami     # clé enregistrée et offre
-lexiafrik logout     # supprime les identifiants et révoque la clé de ce terminal
+lexiafrik login      # prints a code, opens your browser, saves a key
+lexiafrik whoami     # the saved key and its plan
+lexiafrik logout     # deletes the credentials and revokes this terminal's key
 ```
 
-`lexiafrik login` n'utilise ni mot de passe ni clé à copier : vous vous connectez sur
-lexiafrik.com, vérifiez le code affiché dans le terminal et approuvez. Une clé API dédiée à ce
-terminal est créée sur votre compte et enregistrée dans `~/.lexiafrik/credentials.json` (lisible
-par vous seul). Vous pouvez la révoquer à tout moment depuis **lexiafrik.com > Clés API**.
+`lexiafrik login` needs no password and no key to copy: you sign in on lexiafrik.com, check the code shown
+in the terminal and approve. An API key dedicated to this terminal is created on your account and saved in
+`~/.lexiafrik/credentials.json` (readable by you only). You can revoke it at any time from
+**lexiafrik.com > API keys**.
 
-Ordre de recherche de la clé : paramètre `api_key=`, variable `LEXIAFRIK_API_KEY`, puis le fichier
-enregistré par `lexiafrik login`. Sur un serveur ou en CI, créez plutôt une clé sur le site et
-utilisez la variable d'environnement.
+Key lookup order: the `api_key=` argument, the `LEXIAFRIK_API_KEY` environment variable, then the file saved
+by `lexiafrik login`. On a server or in CI, create a key on the website and use the environment variable.
 
 ## Usage
 
@@ -35,30 +36,29 @@ from lexiafrik import LexiAfrikClient
 
 client = LexiAfrikClient()
 
-# Fichier court (50 Mo maximum) : réponse immédiate
-result = client.transcribe("discours.wav", language="wo", include_segments=True)
+# Short file (50 MB maximum): immediate response
+result = client.transcribe("speech.wav", language="wo", include_segments=True)
 print(result.text)
 for seg in result.segments:
-    print(seg)                    # [0.4s → 6.1s] Premier segment.
+    print(seg)                    # [0.4s → 6.1s] First segment.
 
-# Gros fichier ou vidéo : envoi direct, job asynchrone, attente du résultat
+# Large file or video: direct upload, asynchronous job, wait for the result
 result = client.transcribe_large("conference.mp4", language="wo",
                                  on_progress=lambda n: print(n, "segments"))
 
-# Lien direct vers un fichier audio ou vidéo
-result = client.transcribe_url("https://exemple.com/enregistrement.mp3")
+# Direct link to an audio or video file
+result = client.transcribe_url("https://example.com/recording.mp3")
 
-# Langues, compte, historique
+# Languages, account, history
 print([l.code for l in client.list_languages()])
-print(client.get_account().available_minutes, "min disponibles")
+print(client.get_account().available_minutes, "minutes available")
 for t in client.list_transcriptions(page_size=5).items:
     print(t.request_id, t.status)
 ```
 
-Les liens de plateformes de streaming (YouTube, TikTok…) ne sont pas acceptés : fournissez un lien
-direct ou envoyez le fichier.
+Links to streaming platforms (YouTube, TikTok…) are not accepted: provide a direct link or upload the file.
 
-## Gestion des erreurs
+## Error handling
 
 ```python
 from lexiafrik import LexiAfrikClient, AuthenticationError, QuotaExceededError, LexiAfrikError
@@ -66,30 +66,31 @@ from lexiafrik import LexiAfrikClient, AuthenticationError, QuotaExceededError, 
 try:
     result = client.transcribe("audio.wav")
 except AuthenticationError:
-    print("Clé invalide : relancez `lexiafrik login`")
+    print("Invalid key: run `lexiafrik login` again")
 except QuotaExceededError:
-    print("Quota mensuel et crédit épuisés")
+    print("Monthly quota and credit exhausted")
 except LexiAfrikError as e:
-    print(e)
+    print(e)            # English message; e.detail holds the server's own text, if any
 ```
 
-Exceptions : `AuthenticationError` (401/403), `QuotaExceededError` (402), `NotFoundError` (404),
+Exceptions: `AuthenticationError` (401/403), `QuotaExceededError` (402), `NotFoundError` (404),
 `AudioTooLargeError` (413), `UnsupportedFormatError` (415), `TranscriptionError` (422),
 `RateLimitError` (429), `APIError` (5xx).
 
-## Variables d'environnement
+## Environment variables
 
-| Variable | Rôle |
+| Variable | Purpose |
 |---|---|
-| `LEXIAFRIK_API_KEY` | Clé API (prioritaire sur le fichier enregistré). |
-| `LEXIAFRIK_BASE_URL` | Autre adresse d'API (tests). Défaut : `https://api.lexiafrik.com`. |
-| `LEXIAFRIK_CREDENTIALS` | Autre emplacement du fichier d'identifiants. |
+| `LEXIAFRIK_API_KEY` | API key (takes priority over the saved file). |
+| `LEXIAFRIK_BASE_URL` | Another API address (tests). Default: `https://api.lexiafrik.com`. |
+| `LEXIAFRIK_CREDENTIALS` | Another location for the credentials file. |
+| `LEXIAFRIK_LANG` | Preferred language of server messages, sent as `Accept-Language` (default: `en`). |
 
-## Migration depuis la version 1
+## Migrating from version 1
 
-Le SDK 2.0 suit l'API actuelle : un seul type de résultat (`TranscriptionResult`) pour tous les modes,
-`get_usage()` renvoie le compte (offre, quota mensuel, crédit) et non plus des limites journalières,
-les champs `model`, `n_tokens` et `rtf` du résultat n'existent plus.
+SDK 2.0 follows the current API: a single result type (`TranscriptionResult`) for every mode, `get_usage()`
+returns the account (plan, monthly quota, credit) rather than daily limits, and the `model`, `n_tokens`
+and `rtf` fields of the result no longer exist.
 
 ## Tests
 
@@ -97,8 +98,12 @@ les champs `model`, `n_tokens` et `rtf` du résultat n'existent plus.
 python -m unittest discover -s tests -v
 ```
 
-Sans réseau externe ni clé réelle.
+No external network and no real key needed.
 
-## Obtenir une clé API
+## Get an API key
 
-Créez un compte sur [lexiafrik.com](https://lexiafrik.com), ou lancez `lexiafrik login`.
+Create an account on [lexiafrik.com](https://lexiafrik.com), or run `lexiafrik login`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

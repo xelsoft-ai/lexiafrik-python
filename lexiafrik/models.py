@@ -1,4 +1,4 @@
-"""LexiAfrik SDK — Modèles de réponse."""
+"""LexiAfrik SDK — Response models."""
 
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class SegmentResult:
-    """Un segment de parole, avec sa position dans l'audio d'origine."""
+    """A speech segment, with its position in the original audio."""
     index: int
     start_s: float
     end_s: float
@@ -15,9 +15,9 @@ class SegmentResult:
     text: str
     inference_time_s: float = 0.0
     rtf: float = 0.0
-    # Fréquence d'échantillonnage de l'audio archivé de ce segment (None si inconnue).
+    # Sample rate of this segment's archived audio (None if unknown).
     sample_rate: Optional[int] = None
-    # URL temporaire de l'audio du segment (None si l'audio n'est pas conservé).
+    # Temporary URL of the segment audio (None when the audio is not kept).
     audio_url: Optional[str] = None
 
     def __str__(self) -> str:
@@ -26,16 +26,16 @@ class SegmentResult:
 
 @dataclass
 class TranscriptionResult:
-    """Résultat d'une transcription (fichier court, gros fichier ou lien)."""
+    """Result of a transcription (short file, large file or link)."""
     request_id: str
     text: str
     language: Optional[str] = None
     duration_s: float = 0.0
     n_segments: int = 0
-    # Renseigné si include_segments=True (fichier court), toujours pour les jobs asynchrones.
+    # Filled when include_segments=True (short file), always for asynchronous jobs.
     segments: List[SegmentResult] = field(default_factory=list)
     title: Optional[str] = None
-    # URL temporaire de l'audio complet (jobs asynchrones, quand l'audio est conservé).
+    # Temporary URL of the full audio (asynchronous jobs, when the audio is kept).
     audio_url: Optional[str] = None
     sample_rate: Optional[int] = None
     timestamp: Optional[datetime] = None
@@ -48,16 +48,16 @@ class TranscriptionResult:
         return self.text
 
 
-# Compatibilité avec le SDK 1.x : un seul type de résultat pour tous les modes.
+# Compatibility with SDK 1.x: a single result type for every mode.
 URLTranscriptionResult = TranscriptionResult
 
 
 @dataclass
 class AccountInfo:
-    """Offre, quota mensuel et crédit du compte (partagés par toutes ses clés)."""
+    """Plan, monthly quota and credit of the account (shared by all its keys)."""
     plan: str
     plan_name: str
-    # None : quota illimité (offre sur mesure).
+    # None: unlimited quota (custom plan).
     quota_seconds: Optional[float]
     used_seconds: float
     quota_remaining_seconds: Optional[float]
@@ -75,7 +75,7 @@ class AccountInfo:
 
     @property
     def available_minutes(self) -> Optional[float]:
-        """Minutes transcriptibles maintenant : quota restant + crédit (None si illimité)."""
+        """Minutes you can transcribe right now: remaining quota + credit (None if unlimited)."""
         if self.quota_remaining_seconds is None:
             return None
         return round(self.quota_remaining_seconds / 60 + self.wallet_minutes, 1)
@@ -90,7 +90,7 @@ class Language:
 
 @dataclass
 class TranscriptionSummary:
-    """Une ligne de l'historique (list_transcriptions)."""
+    """One row of the history (list_transcriptions)."""
     request_id: str
     status: str
     text: Optional[str] = None

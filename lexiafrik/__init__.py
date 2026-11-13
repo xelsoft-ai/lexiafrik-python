@@ -1,10 +1,10 @@
 """
-LexiAfrik SDK — API de transcription vocale du wolof et des langues africaines
+LexiAfrik SDK — speech-to-text for Wolof and other African languages
 
-Usage rapide:
+Quick start:
     from lexiafrik import LexiAfrikClient
 
-    client = LexiAfrikClient()          # clé : api_key=, LEXIAFRIK_API_KEY ou `lexiafrik login`
+    client = LexiAfrikClient()          # key: api_key=, LEXIAFRIK_API_KEY or `lexiafrik login`
     result = client.transcribe("audio.wav", language="wo")
     print(result.text)
 """

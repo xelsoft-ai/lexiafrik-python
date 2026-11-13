@@ -1,7 +1,7 @@
 """
-Tests du SDK, sans réseau externe ni clé réelle :
-  - erreurs et transcription courte : httpx.MockTransport ;
-  - gros fichier : faux serveur HTTP local (envoi PUT réel, Content-Length, sondage du job).
+SDK tests, with no external network and no real key:
+  - errors and short transcription: httpx.MockTransport;
+  - large file: local fake HTTP server (real PUT upload, Content-Length, job polling).
 
     python -m unittest discover -s tests -v
 """
@@ -93,6 +93,24 @@ class Errors(unittest.TestCase):
                     client.health()
                 self.assertIn(body["detail"].split(":")[0], str(cm.exception))
 
+    def test_messages_are_english_and_keep_the_server_text(self):
+        client = mock_client(lambda r: httpx.Response(402, json={"detail": "Quota mensuel épuisé"}))
+        with self.assertRaises(QuotaExceededError) as cm:
+            client.health()
+        self.assertEqual(cm.exception.message, "Monthly quota and credit exhausted: top up or change plan.")
+        self.assertEqual(cm.exception.detail, "Quota mensuel épuisé")
+        self.assertIn("[server: Quota mensuel épuisé]", str(cm.exception))
+
+    def test_announces_english_by_default(self):
+        seen = {}
+
+        def handler(req):
+            seen["lang"] = req.headers.get("accept-language")
+            return httpx.Response(200, json={"status": "ok"})
+
+        mock_client(handler).health()
+        self.assertEqual(seen["lang"], "en")
+
     def test_validation_error_list_is_readable(self):
         client = mock_client(lambda r: httpx.Response(422, json={"detail": [{"msg": "champ requis", "loc": ["body"]}]}))
         with self.assertRaises(TranscriptionError) as cm:
@@ -149,7 +167,7 @@ class AccountAndHistory(unittest.TestCase):
 
 
 class FakeServer(BaseHTTPRequestHandler):
-    """Mini API : /v1/uploads, stockage PUT, /v1/transcribe-url, /v1/tasks/{id} (2 sondages en cours puis succès)."""
+    """Mini API: /v1/uploads, PUT storage, /v1/transcribe-url, /v1/tasks/{id} (2 polls in progress, then success)."""
     state = {"polls": 0, "put": None, "payload": None, "headers": None}
 
     def log_message(self, *a):  # silence
@@ -221,8 +239,8 @@ class LargeFile(unittest.TestCase):
 
         size, digest, key_header, ctype = FakeServer.state["put"]
         self.assertEqual(size, len(data))
-        self.assertEqual(digest, hashlib.sha256(data).hexdigest())      # fichier reçu intact
-        self.assertIsNone(key_header)                                    # la clé API n'est pas envoyée au stockage
+        self.assertEqual(digest, hashlib.sha256(data).hexdigest())      # file received intact
+        self.assertIsNone(key_header)                                    # the API key is not sent to storage
         self.assertEqual(ctype, "video/mp4")
         self.assertEqual(FakeServer.state["upload_req"], {"filename": "conference.mp4", "content_type": "video/mp4"})
         p = FakeServer.state["payload"]

@@ -1,12 +1,12 @@
 """
-LexiAfrik SDK — Connexion d'un terminal sans mot de passe (flux « device code », RFC 8628).
+LexiAfrik SDK — Sign in a terminal without a password (device-code flow, RFC 8628).
 
     from lexiafrik.auth import login
-    login()                      # affiche un code, ouvre le navigateur, enregistre la clé
+    login()                      # prints a code, opens the browser, saves the key
 
-La clé API est créée sur votre compte à l'approbation, puis enregistrée dans
-``~/.lexiafrik/credentials.json`` (lisible par vous seul). ``LexiAfrikClient()`` la
-retrouve ensuite sans paramètre. Elle reste révocable depuis lexiafrik.com > Clés API.
+The API key is created on your account when you approve, then saved in
+``~/.lexiafrik/credentials.json`` (readable by you only). ``LexiAfrikClient()`` finds it
+afterwards without any parameter. It stays revocable from lexiafrik.com > API keys.
 """
 
 import json
@@ -26,7 +26,7 @@ DEFAULT_BASE_URL = "https://api.lexiafrik.com"
 
 
 def credentials_path() -> Path:
-    """Fichier d'identifiants (LEXIAFRIK_CREDENTIALS pour le déplacer)."""
+    """Credentials file (set LEXIAFRIK_CREDENTIALS to move it)."""
     override = os.environ.get("LEXIAFRIK_CREDENTIALS")
     return Path(override) if override else Path.home() / ".lexiafrik" / "credentials.json"
 
@@ -46,7 +46,7 @@ def save_credentials(data: dict) -> Path:
         os.chmod(path.parent, 0o700)
     except OSError:
         pass
-    # Création directe en 0600 : la clé n'est jamais lisible par les autres utilisateurs.
+    # Created directly as 0600: the key is never readable by other users.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -78,41 +78,41 @@ def login(
     timeout: float = 30.0,
 ) -> dict:
     """
-    Connecte ce terminal à votre compte LexiAfrik.
+    Connect this terminal to your LexiAfrik account.
 
     Returns:
-        ``{"api_key", "key_hash", "prefix", "name", "base_url"}`` (enregistré sur disque si ``save``).
+        ``{"api_key", "key_hash", "prefix", "name", "base_url"}`` (saved to disk when ``save``).
 
     Raises:
-        AuthenticationError: connexion refusée dans le navigateur.
-        LexiAfrikError: code expiré ou API injoignable.
+        AuthenticationError: sign-in denied in the browser.
+        LexiAfrikError: code expired or API unreachable.
     """
     base = (base_url or os.environ.get("LEXIAFRIK_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
     with httpx.Client(base_url=base, timeout=timeout) as http:
         try:
             r = http.post("/v1/auth/device", json={"client_name": client_name or default_client_name()})
         except httpx.HTTPError as e:
-            raise LexiAfrikError(f"API injoignable ({base}) : {e}") from e
+            raise LexiAfrikError(f"API unreachable ({base}): {e}") from e
         if r.status_code == 429:
-            raise LexiAfrikError("Trop de tentatives. Réessayez dans quelques minutes.")
+            raise LexiAfrikError("Too many attempts. Try again in a few minutes.")
         if r.status_code != 200:
-            raise LexiAfrikError(f"Impossible de démarrer la connexion (HTTP {r.status_code}).")
+            raise LexiAfrikError(f"Could not start the sign-in (HTTP {r.status_code}).")
         d = r.json()
 
         url = d["verification_uri_complete"]
         echo("")
-        echo("Pour connecter ce terminal, ouvrez :")
+        echo("To connect this terminal, open:")
         echo(f"  {url}")
         echo("")
-        echo(f"Code de confirmation : {d['user_code']}")
-        echo("(n'approuvez que si vous venez de lancer cette commande)")
+        echo(f"Confirmation code: {d['user_code']}")
+        echo("(only approve if you just ran this command)")
         echo("")
         if open_browser:
             try:
                 webbrowser.open(url)
-            except Exception:  # navigateur absent (serveur, SSH) : l'URL reste affichée
+            except Exception:  # no browser (server, SSH): the URL stays displayed
                 pass
-        echo("En attente de votre approbation…")
+        echo("Waiting for your approval…")
 
         interval = max(1, int(d.get("interval", 5)))
         deadline = time.monotonic() + int(d.get("expires_in", 600))
@@ -121,12 +121,12 @@ def login(
             try:
                 r = http.post("/v1/auth/device/token", json={"device_code": d["device_code"]})
             except httpx.HTTPError:
-                continue  # coupure réseau passagère
+                continue  # transient network failure
             if r.status_code == 200:
                 creds = {**r.json(), "base_url": base}
                 if save:
                     path = save_credentials(creds)
-                    echo(f"Connecté. Clé « {creds['name']} » enregistrée dans {path}")
+                    echo(f"Signed in. Key '{creds['name']}' saved to {path}")
                 return creds
             is_json = r.headers.get("content-type", "").startswith("application/json")
             err = (r.json() if is_json else {}).get("error")
@@ -136,8 +136,8 @@ def login(
                 interval += 5
                 continue
             if err == "access_denied":
-                raise AuthenticationError("Connexion refusée dans le navigateur.")
+                raise AuthenticationError("Sign-in denied in the browser.")
             if err == "expired_token":
-                raise LexiAfrikError("Le code a expiré. Relancez `lexiafrik login`.")
-            raise LexiAfrikError(f"Connexion impossible ({err or r.status_code}).")
-    raise LexiAfrikError("Le code a expiré. Relancez `lexiafrik login`.")
+                raise LexiAfrikError("The code has expired. Run `lexiafrik login` again.")
+            raise LexiAfrikError(f"Sign-in failed ({err or r.status_code}).")
+    raise LexiAfrikError("The code has expired. Run `lexiafrik login` again.")
