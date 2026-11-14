@@ -37,7 +37,9 @@ SYNC_RESPONSE = {
 
 
 def mock_client(handler) -> LexiAfrikClient:
-    return LexiAfrikClient(api_key="lx_test", base_url="https://api.test", transport=httpx.MockTransport(handler))
+    # max_retries=0: these tests check the mapping of each status, retries have their own tests.
+    return LexiAfrikClient(api_key="lx_test", base_url="https://api.test", transport=httpx.MockTransport(handler),
+                           max_retries=0)
 
 
 class ShortFile(unittest.TestCase):

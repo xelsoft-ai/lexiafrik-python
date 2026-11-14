@@ -9,68 +9,35 @@ LexiAfrik SDK — Main client
     print(result.text)
 
     result = client.transcribe_large("conference.mp4")              # large file or video
-    for seg in result.segments:
-        print(seg)
+    open("conference.srt", "w", encoding="utf-8").write(result.to_srt())
 
     print(client.get_account().available_minutes, "minutes available")
+
+An asynchronous twin lives in ``lexiafrik.AsyncLexiAfrikClient``.
 """
 
 import mimetypes
 import os
 import time
-from datetime import datetime
 from pathlib import Path
-from typing import BinaryIO, Callable, Iterator, List, Optional, Union
+from typing import Any, BinaryIO, Callable, Dict, Iterator, List, Optional, Union
 
 import httpx
 
-from .auth import DEFAULT_BASE_URL, load_credentials
-from .exceptions import (
-    APIError, AudioTooLargeError, AuthenticationError, LexiAfrikError, NotFoundError,
-    QuotaExceededError, RateLimitError, TranscriptionError, UnsupportedFormatError,
+from ._http import RetryPolicy, raise_for_response
+from ._parse import (
+    normalize_tags, parse_account, parse_dashboard, parse_history, parse_key, parse_languages, parse_new_key,
+    parse_result, parse_segment_page,
 )
+from .auth import DEFAULT_BASE_URL, load_credentials
+from .exceptions import APIError, AudioTooLargeError, AuthenticationError, LexiAfrikError, TranscriptionError
 from .models import (
-    AccountInfo, Language, SegmentResult, TranscriptionPage, TranscriptionResult,
-    TranscriptionSummary,
+    AccountInfo, ApiKey, FolderItem, Language, NewApiKey, SegmentPage, TranscriptionPage, TranscriptionResult,
+    UsageDashboard,
 )
 
 _CHUNK = 1024 * 1024
-
-
-def _parse_dt(value) -> Optional[datetime]:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def _segments(raw) -> List[SegmentResult]:
-    return [
-        SegmentResult(
-            index=s["index"], start_s=s["start_s"], end_s=s["end_s"], duration_s=s["duration_s"],
-            text=s.get("text") or "", inference_time_s=s.get("inference_time_s") or 0.0,
-            rtf=s.get("rtf") or 0.0, sample_rate=s.get("sample_rate"), audio_url=s.get("audio_url"),
-        )
-        for s in (raw or [])
-    ]
-
-
-def _result(data: dict, request_id: str) -> TranscriptionResult:
-    segs = _segments(data.get("segments"))
-    return TranscriptionResult(
-        request_id=request_id,
-        text=data.get("full_text") or "",
-        language=data.get("language"),
-        duration_s=data.get("total_duration_s") or 0.0,
-        n_segments=data.get("n_segments") or len(segs),
-        segments=segs,
-        title=data.get("title"),
-        audio_url=data.get("audio_url"),
-        sample_rate=data.get("sample_rate"),
-        timestamp=_parse_dt(data.get("timestamp")),
-    )
+_UNSET: Any = object()  # "argument not given" (None has a meaning: clear the correction)
 
 
 def _file_chunks(path: Path) -> Iterator[bytes]:
@@ -80,6 +47,17 @@ def _file_chunks(path: Path) -> Iterator[bytes]:
             if not chunk:
                 return
             yield chunk
+
+
+def _meta_body(edited_text: Any, tags: Any) -> Dict[str, Any]:
+    body: Dict[str, Any] = {}
+    if edited_text is not _UNSET:
+        body["edited_text"] = edited_text
+    if tags is not _UNSET:
+        body["tags"] = normalize_tags(tags or [])
+    if not body:
+        raise LexiAfrikError("Nothing to update: pass edited_text= and/or tags=.")
+    return body
 
 
 class LexiAfrikClient:
@@ -92,6 +70,8 @@ class LexiAfrikClient:
         base_url: API base URL. Default: LEXIAFRIK_BASE_URL, otherwise the one of the saved
                   sign-in, otherwise https://api.lexiafrik.com
         timeout:  Timeout per request, in seconds (default: 300).
+        max_retries: Automatic retries after a network error, HTTP 429 or 503 (default: 3; 0 disables).
+                  Requests that create something are never repeated after a timeout (see ``RetryPolicy``).
         transport: Custom httpx transport (tests).
     """
 
@@ -101,6 +81,8 @@ class LexiAfrikClient:
         base_url: Optional[str] = None,
         timeout: float = 300.0,
         transport: Optional[httpx.BaseTransport] = None,
+        max_retries: int = 3,
+        retry_backoff: float = 0.5,
     ):
         saved = None
         self.api_key = api_key or os.environ.get("LEXIAFRIK_API_KEY")
@@ -121,8 +103,43 @@ class LexiAfrikClient:
             headers={"X-API-Key": self.api_key, "Accept-Language": os.environ.get("LEXIAFRIK_LANG", "en")},
             timeout=timeout, transport=transport,
         )
-        # File uploads go to storage without the API key (signed URL).
-        self._storage = httpx.Client(timeout=timeout, transport=transport)
+        # File uploads go to storage without the API key (signed URL): that client is created on first use.
+        self._storage_client: Optional[httpx.Client] = None
+        self._timeout = timeout
+        self._transport = transport
+        self._retry = RetryPolicy(max_retries=max_retries, backoff=retry_backoff)
+        self._sleep = time.sleep  # replaced in tests
+
+    @property
+    def _storage(self) -> httpx.Client:
+        if self._storage_client is None:
+            self._storage_client = httpx.Client(timeout=self._timeout, transport=self._transport)
+        return self._storage_client
+
+    # ================================================================
+    # TRANSPORT (retries, error mapping)
+    # ================================================================
+
+    def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """One HTTP call with automatic retries (network errors, 429, 503 — and 500/502/504 for safe methods)."""
+        attempt = 0
+        while True:
+            try:
+                resp = self._client.request(method, url, **kwargs)
+            except httpx.HTTPError as exc:
+                if attempt < self._retry.max_retries and self._retry.retry_exception(method, exc):
+                    attempt += 1
+                    self._sleep(self._retry.delay(attempt))
+                    continue
+                raise APIError(f"Could not reach the LexiAfrik API ({type(exc).__name__}: {exc}).") from exc
+            if attempt < self._retry.max_retries and self._retry.retry_status(method, resp.status_code):
+                attempt += 1
+                self._sleep(self._retry.delay(attempt, resp))
+                continue
+            return resp
+
+    def _call(self, method: str, url: str, **kwargs) -> dict:
+        return raise_for_response(self._send(method, url, **kwargs))
 
     # ================================================================
     # SHORT FILE (immediate response)
@@ -145,7 +162,7 @@ class LexiAfrikClient:
             filename:         File name (its extension matters). Ignored for a path.
             language:         Language of the audio: `wo`, `wo-SN`, `ha`, `fr`… (see list_languages()).
                               API default: Wolof.
-            include_segments: Also return the timestamped segments.
+            include_segments: Also return the timestamped segments (needed for SRT / WebVTT output).
             keep_audio:       False: only the text is kept, not the audio.
 
         Raises:
@@ -171,9 +188,8 @@ class LexiAfrikClient:
         form = {"include_segments": str(include_segments).lower(), "keep_audio": str(keep_audio).lower()}
         if language:
             form["language"] = language
-        data = self._handle_response(self._client.post(
-            "/v1/transcribe", files={"file": (filename, content, ctype)}, data=form))
-        return _result(data, data.get("request_id", ""))
+        data = self._call("POST", "/v1/transcribe", files={"file": (filename, content, ctype)}, data=form)
+        return parse_result(data, data.get("request_id", ""))
 
     # ================================================================
     # LARGE FILES, VIDEOS, LINKS (asynchronous job)
@@ -190,16 +206,18 @@ class LexiAfrikClient:
         ctype = content_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         size = path.stat().st_size
 
-        slot = self._handle_response(self._client.post(
-            "/v1/uploads", json={"filename": path.name, "content_type": ctype}))
+        slot = self._call("POST", "/v1/uploads", json={"filename": path.name, "content_type": ctype})
         max_mb = slot.get("max_size_mb")
         if max_mb and size > max_mb * 1024 * 1024:
             raise AudioTooLargeError(
                 f"File of {size / 1024 / 1024:.0f} MB: your plan accepts {max_mb} MB at most.")
 
         headers = {**(slot.get("headers") or {}), "Content-Length": str(size)}
-        resp = self._storage.request(slot.get("method", "PUT"), slot["upload_url"],
-                                     headers=headers, content=_file_chunks(path))
+        try:
+            resp = self._storage.request(slot.get("method", "PUT"), slot["upload_url"],
+                                         headers=headers, content=_file_chunks(path))
+        except httpx.HTTPError as exc:
+            raise APIError(f"File upload failed ({type(exc).__name__}: {exc}).") from exc
         if resp.status_code >= 300:
             raise APIError(f"File upload failed (HTTP {resp.status_code}).", status_code=resp.status_code)
         return slot["upload_key"]
@@ -222,11 +240,11 @@ class LexiAfrikClient:
                      ("title", title), ("webhook_url", webhook_url)):
             if v:
                 payload[k] = v
-        return self._handle_response(self._client.post("/v1/transcribe-url", json=payload))["task_id"]
+        return self._call("POST", "/v1/transcribe-url", json=payload)["task_id"]
 
     def get_task(self, task_id: str) -> dict:
         """Raw state of a job: `status` is processing, success or error."""
-        return self._handle_response(self._client.get(f"/v1/tasks/{task_id}"))
+        return self._call("GET", f"/v1/tasks/{task_id}")
 
     def wait_for_task(
         self,
@@ -244,11 +262,11 @@ class LexiAfrikClient:
         """
         deadline = time.monotonic() + job_timeout
         while time.monotonic() < deadline:
-            resp = self._client.get(f"/v1/tasks/{task_id}")
-            data = self._handle_response(resp)
+            resp = self._send("GET", f"/v1/tasks/{task_id}")
+            data = raise_for_response(resp)
             status = data.get("status")
             if status == "success":
-                return _result(data, task_id)
+                return parse_result(data, task_id)
             if status == "error":
                 raise TranscriptionError("Transcription failed.", detail=data.get("error"))
             if on_progress:
@@ -306,105 +324,214 @@ class LexiAfrikClient:
                                    job_timeout=job_timeout, on_progress=on_progress)
 
     # ================================================================
+    # SEVERAL FILES, WHOLE FOLDERS
+    # ================================================================
+
+    def transcribe_folder(
+        self,
+        folder: Union[str, Path],
+        *,
+        language: Optional[str] = None,
+        output_format: Optional[str] = None,
+        out_dir: Optional[Union[str, Path]] = None,
+        recursive: bool = False,
+        skip_existing: bool = True,
+        jobs: int = 2,
+        keep_audio: bool = True,
+        on_item: Optional[Callable[[FolderItem], None]] = None,
+    ) -> List[FolderItem]:
+        """
+        Transcribe every audio and video file of a folder (or a single file), ``jobs`` at a time.
+
+        Args:
+            output_format: ``"txt"``, ``"srt"``, ``"vtt"`` or ``"json"``: write each transcription to disk
+                           (next to the source file, or under ``out_dir``). None: only return the results.
+            skip_existing: do not send again a file whose output already exists (resume an interrupted run).
+            on_item:       called as each file finishes (progress display).
+
+        Returns:
+            One ``FolderItem`` per file (status ``success``, ``error`` or ``skipped``). One failing file never
+            stops the others.
+        """
+        from . import batch
+        root = Path(folder)
+        files = batch.find_media(root, recursive)
+        return batch.transcribe_files(self, files, language=language, output_format=output_format,
+                                      out_dir=out_dir, root=root, skip_existing=skip_existing, jobs=jobs,
+                                      keep_audio=keep_audio, on_item=on_item)
+
+    # ================================================================
     # LANGUAGES, ACCOUNT, HISTORY
     # ================================================================
 
     def list_languages(self) -> List[Language]:
         """Available languages (public route)."""
-        data = self._handle_response(self._client.get("/v1/languages"))
-        return [Language(code=l["code"], name=l["name"], aliases=l.get("aliases") or [])
-                for l in data.get("languages", [])]
+        return parse_languages(self._call("GET", "/v1/languages"))
 
     def get_account(self) -> AccountInfo:
         """Plan, remaining monthly quota and credit of the account."""
-        d = self._handle_response(self._client.get("/v1/billing/account"))
-        return AccountInfo(
-            plan=d["plan"], plan_name=d.get("plan_name") or d["plan"],
-            quota_seconds=d.get("quota_seconds"), used_seconds=d.get("used_seconds") or 0.0,
-            quota_remaining_seconds=d.get("quota_remaining_seconds"),
-            wallet_usd=d.get("wallet_usd") or 0.0, wallet_minutes=d.get("wallet_minutes") or 0.0,
-            period_end=str(d["period_end"]) if d.get("period_end") else None,
-            wallet_expires_at=str(d["wallet_expires_at"]) if d.get("wallet_expires_at") else None,
-            features=d.get("features") or {},
-        )
+        return parse_account(self._call("GET", "/v1/billing/account"))
 
     # SDK 1.x name: daily limits no longer exist, the plan and the monthly quota replace them.
     get_usage = get_account
 
+    def get_usage_dashboard(self, period: str = "7d") -> UsageDashboard:
+        """Usage of the account: today, this month, history, languages, per-key breakdown.
+        ``period`` is ``"7d"``, ``"30d"`` or ``"month"``."""
+        return parse_dashboard(self._call("GET", "/v1/usage/dashboard", params={"period": period}))
+
     def list_transcriptions(self, page: int = 1, page_size: int = 20,
                             status: Optional[str] = None) -> TranscriptionPage:
         """History of your transcriptions, newest first."""
-        params = {"page": page, "page_size": page_size}
+        params: Dict[str, Any] = {"page": page, "page_size": page_size}
         if status:
             params["status"] = status
-        d = self._handle_response(self._client.get("/v1/transcriptions", params=params))
-        items = [
-            TranscriptionSummary(
-                request_id=r["request_id"], status=r.get("status") or "", text=r.get("text"),
-                title=r.get("source_title"), language=r.get("language"), duration_s=r.get("duration_s"),
-                timestamp=str(r["timestamp"]) if r.get("timestamp") else None,
-                error=r.get("error_message"), tags=r.get("tags") or [],
-            )
-            for r in d.get("items", [])
-        ]
-        return TranscriptionPage(items=items, total=d.get("total", len(items)), page=page, page_size=page_size)
+        return parse_history(self._call("GET", "/v1/transcriptions", params=params), page, page_size)
 
     def get_transcription(self, request_id: str) -> dict:
-        """Details of a transcription (text, segments, corrections) as returned by the API."""
-        return self._handle_response(self._client.get(f"/v1/transcriptions/{request_id}"))
+        """Details of a transcription (text, corrections, tags, original file) as returned by the API."""
+        return self._call("GET", f"/v1/transcriptions/{request_id}")
 
     def delete_transcription(self, request_id: str) -> None:
         """Delete a transcription and its files (irreversible)."""
-        self._handle_response(self._client.delete(f"/v1/transcriptions/{request_id}"))
+        self._call("DELETE", f"/v1/transcriptions/{request_id}")
+
+    # ================================================================
+    # SEGMENTS, CORRECTIONS, TAGS
+    # ================================================================
+
+    def get_segments(self, request_id: str, *, q: Optional[str] = None, offset: int = 0,
+                     limit: Optional[int] = None) -> SegmentPage:
+        """Segments of a stored transcription, with corrections and tags.
+
+        Args:
+            q:      search in the text, the corrections, the tags or the language (``"wolof"``, ``"fr"``…).
+            limit:  page size; None returns every segment (export).
+        """
+        params: Dict[str, Any] = {"offset": offset}
+        if limit is not None:
+            params["limit"] = limit
+        if q:
+            params["q"] = q
+        return parse_segment_page(self._call("GET", f"/v1/transcriptions/{request_id}/segments", params=params),
+                                  offset, limit)
+
+    def update_transcription(self, request_id: str, *, edited_text: Any = _UNSET, tags: Any = _UNSET) -> dict:
+        """Correct the text of a whole transcription and/or replace its tags.
+
+        ``edited_text=None`` (or an empty string) removes the correction. ``tags`` is a dict
+        (``{"topic": "interview"}``) or a list of ``{"key", "value"}``; ``tags={}`` removes them all.
+        Arguments you do not pass are left unchanged.
+        """
+        return self._call("PATCH", f"/v1/transcriptions/{request_id}", json=_meta_body(edited_text, tags))
+
+    def update_segment(self, request_id: str, segment_id: int, *, edited_text: Any = _UNSET,
+                       tags: Any = _UNSET) -> dict:
+        """Correct one segment and/or replace its tags (same rules as ``update_transcription``).
+        When the text changes, the corrected text of the whole transcription is recomputed and returned."""
+        return self._call("PATCH", f"/v1/transcriptions/{request_id}/segments/{segment_id}",
+                          json=_meta_body(edited_text, tags))
+
+    def delete_segment(self, request_id: str, segment_id: int) -> dict:
+        """Delete one segment and its audio (irreversible)."""
+        return self._call("DELETE", f"/v1/transcriptions/{request_id}/segments/{segment_id}")
+
+    def get_audio_url(self, request_id: str, segment_id: Optional[int] = None) -> str:
+        """Temporary URL (about one hour) of the full audio, or of one segment's audio."""
+        path = f"/v1/transcriptions/{request_id}" + (f"/segments/{segment_id}" if segment_id is not None else "")
+        return self._call("GET", path + "/audio")["url"]
+
+    # ================================================================
+    # API KEYS
+    # ================================================================
+
+    def list_keys(self) -> List[ApiKey]:
+        """The API keys of your account (the main key first). Secrets are never returned."""
+        return [parse_key(k) for k in self._call("GET", "/v1/keys").get("keys", [])]
+
+    def create_key(self, name: str, description: Optional[str] = None, notify: bool = True) -> NewApiKey:
+        """Create an extra key (one per application). The secret is returned once: store it immediately."""
+        body: Dict[str, Any] = {"name": name, "notify": notify}
+        if description:
+            body["description"] = description
+        return parse_new_key(self._call("POST", "/v1/keys", json=body))
+
+    def rename_key(self, key_hash: str, name: str) -> dict:
+        """Rename a key of your account."""
+        return self._call("PATCH", f"/v1/keys/{key_hash}", json={"name": name})
+
+    def revoke_key(self, key_hash: str) -> dict:
+        """Revoke a key of your account (the main key cannot be revoked)."""
+        return self._call("DELETE", f"/v1/keys/{key_hash}")
+
+    def rotate_key(self, key_hash: str, name: Optional[str] = None, description: Optional[str] = None,
+                   notify: bool = True) -> NewApiKey:
+        """Replace a key by a new one (history, plan and credit follow). The new secret is returned once."""
+        body: Dict[str, Any] = {"notify": notify}
+        if name:
+            body["name"] = name
+        if description:
+            body["description"] = description
+        return parse_new_key(self._call("POST", f"/v1/keys/{key_hash}/rotate", json=body))
+
+    # ================================================================
+    # PLANS AND PAYMENTS
+    # ================================================================
+
+    def list_plans(self) -> dict:
+        """The official price list: plans, credit packs, quotas (public route; raw API payload)."""
+        return self._call("GET", "/v1/billing/plans")
+
+    def get_ledger(self, limit: int = 50) -> List[dict]:
+        """The wallet journal: top-ups, bonuses, usage, adjustments (raw API rows)."""
+        return self._call("GET", "/v1/billing/ledger", params={"limit": limit}).get("items", [])
+
+    def list_payments(self, limit: int = 50) -> List[dict]:
+        """Payment history (raw API rows)."""
+        return self._call("GET", "/v1/billing/payments", params={"limit": limit}).get("items", [])
+
+    def quote(self, kind: str, item: str) -> dict:
+        """Price of a purchase before paying. ``kind`` is ``"subscription"`` or ``"topup"``; ``item`` a plan
+        (``standard``, ``pro``) or a credit pack id (see ``list_plans()``)."""
+        return self._call("POST", "/v1/billing/quote", json={"kind": kind, "item": item})
+
+    def create_checkout(self, kind: str, item: str, success_url: str, cancel_url: str,
+                        expected_amount_xof: Optional[int] = None) -> dict:
+        """Start a payment. Returns ``redirect_url``: open it in a browser to pay. Nothing is charged until the
+        payment is completed there. Pass ``expected_amount_xof`` from ``quote()`` to be protected against a
+        rate change between the quote and the payment (HTTP 409)."""
+        body: Dict[str, Any] = {"kind": kind, "item": item, "success_url": success_url, "cancel_url": cancel_url}
+        if expected_amount_xof is not None:
+            body["expected_amount_xof"] = expected_amount_xof
+        return self._call("POST", "/v1/billing/checkout", json=body)
+
+    # ================================================================
+    # REAL TIME (WebSocket)
+    # ================================================================
+
+    def realtime(self, timeout: float = 60.0):
+        """Open a real-time session (Professional and Enterprise plans). Requires ``pip install
+        "lexiafrik[realtime]"``. Use it as a context manager; see ``lexiafrik.realtime.RealtimeSession``."""
+        from .realtime import RealtimeSession
+        return RealtimeSession(self.api_key, self.base_url, timeout=timeout)
 
     def health(self) -> dict:
         """Check that the API is up."""
-        return self._handle_response(self._client.get("/health"))
+        return self._call("GET", "/health")
 
     # ================================================================
     # INTERNAL
     # ================================================================
 
     def _handle_response(self, response: httpx.Response) -> dict:
-        """Turn the HTTP response into a dict, or raise the matching exception.
-
-        The message is always English; the server's own text (its language is the server's)
-        is kept in the exception's ``detail`` attribute and shown after the message."""
-        if response.status_code < 300:
-            return response.json() if response.content else {}
-
-        try:
-            body = response.json()
-            detail = body.get("detail") or body.get("error") or response.text
-        except Exception:
-            detail = response.text
-        if isinstance(detail, list):  # validation error (422)
-            detail = "; ".join(str(d.get("msg", d)) if isinstance(d, dict) else str(d) for d in detail)
-
-        code = response.status_code
-        detail = str(detail) if detail else None
-        if code == 401:
-            raise AuthenticationError("Invalid or revoked API key. Run `lexiafrik login` or check LEXIAFRIK_API_KEY.", detail)
-        if code == 403:
-            raise AuthenticationError("Access denied for this key or account.", detail)
-        if code == 402:
-            raise QuotaExceededError("Monthly quota and credit exhausted: top up or change plan.", detail)
-        if code == 404:
-            raise NotFoundError("Not found.", detail)
-        if code == 413:
-            raise AudioTooLargeError("File too large for this route: use transcribe_large().", detail)
-        if code == 415:
-            raise UnsupportedFormatError("Unsupported audio format.", detail)
-        if code == 422:
-            raise TranscriptionError("The request could not be processed.", detail)
-        if code == 429:
-            raise RateLimitError("Too many requests: slow down and retry shortly.", detail)
-        raise APIError(f"API error (HTTP {code}).", status_code=code, detail=detail)
+        """Kept for compatibility: see ``lexiafrik._http.raise_for_response``."""
+        return raise_for_response(response)
 
     def close(self):
         """Close the HTTP connections."""
         self._client.close()
-        self._storage.close()
+        if self._storage_client is not None:
+            self._storage_client.close()
 
     def __enter__(self):
         return self

@@ -10,15 +10,23 @@ Quick start:
 """
 
 from .client import LexiAfrikClient
+from .async_client import AsyncLexiAfrikClient
 from .models import (
     AccountInfo,
+    ApiKey,
+    FolderItem,
     Language,
+    NewApiKey,
+    SegmentDetail,
+    SegmentPage,
     SegmentResult,
     TranscriptionPage,
     TranscriptionResult,
     TranscriptionSummary,
     URLTranscriptionResult,
+    UsageDashboard,
 )
+from . import formats
 from .exceptions import (
     LexiAfrikError,
     AuthenticationError,
@@ -31,10 +39,18 @@ from .exceptions import (
     APIError,
 )
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 __author__ = "XEL SOFT AI"
 __all__ = [
     "LexiAfrikClient",
+    "AsyncLexiAfrikClient",
+    "formats",
+    "ApiKey",
+    "NewApiKey",
+    "SegmentDetail",
+    "SegmentPage",
+    "UsageDashboard",
+    "FolderItem",
     "TranscriptionResult",
     "URLTranscriptionResult",
     "SegmentResult",

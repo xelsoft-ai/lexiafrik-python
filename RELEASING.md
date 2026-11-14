@@ -26,8 +26,8 @@ mistake by publishing the next number (`2.0.1`), never by editing a published on
 3. **Update `CHANGELOG.md`** (and the documentation site if the API surface changed).
 4. **Check locally:**
    ```bash
-   python -m unittest discover -s tests
-   python -m pip install build twine
+   python -m pip install build twine pytest httpx websockets
+   python -m pytest tests
    python -m build && python -m twine check dist/*
    ```
 5. **Commit and push to `main`.** The workflow publishes what is on the tagged commit, so push first.

@@ -47,6 +47,23 @@ class TranscriptionResult:
     def __str__(self) -> str:
         return self.text
 
+    # Output formats (see lexiafrik.formats). SRT and WebVTT use the segments.
+    def to_text(self) -> str:
+        from . import formats
+        return formats.to_text(self)
+
+    def to_srt(self) -> str:
+        from . import formats
+        return formats.to_srt(self)
+
+    def to_vtt(self) -> str:
+        from . import formats
+        return formats.to_vtt(self)
+
+    def to_json(self, indent: int = 2) -> str:
+        from . import formats
+        return formats.to_json(self, indent)
+
 
 # Compatibility with SDK 1.x: a single result type for every mode.
 URLTranscriptionResult = TranscriptionResult
@@ -108,3 +125,83 @@ class TranscriptionPage:
     total: int
     page: int
     page_size: int
+
+
+@dataclass
+class SegmentDetail:
+    """A segment of a stored transcription, with its correction and tags."""
+    id: int
+    index: Optional[int]
+    start_s: Optional[float]
+    end_s: Optional[float]
+    text: str
+    edited_text: Optional[str] = None
+    tags: List[Dict[str, str]] = field(default_factory=list)
+    has_audio: bool = False
+    audio_url: Optional[str] = None
+    languages: List[str] = field(default_factory=list)
+
+    @property
+    def best_text(self) -> str:
+        """The corrected text when there is one, otherwise the transcribed text."""
+        return self.edited_text or self.text
+
+
+@dataclass
+class SegmentPage:
+    items: List[SegmentDetail]
+    total: int
+    offset: int
+    limit: Optional[int]
+
+
+@dataclass
+class ApiKey:
+    """An API key of your account (the secret itself is never returned again after creation)."""
+    key_hash: str
+    name: str
+    prefix: str
+    tier: Optional[str] = None
+    active: bool = True
+    primary: bool = False
+    current: bool = False
+    description: Optional[str] = None
+    created_at: Optional[str] = None
+    last_used_at: Optional[str] = None
+
+
+@dataclass
+class NewApiKey:
+    """A key just created or rotated. ``api_key`` is the secret: it is shown only once, store it now."""
+    api_key: str
+    key_hash: str
+    prefix: str
+    name: str
+    tier: Optional[str] = None
+
+    def __repr__(self) -> str:  # never leak the secret in logs or tracebacks
+        return f"NewApiKey(name={self.name!r}, prefix={self.prefix!r}, api_key='***')"
+
+
+@dataclass
+class UsageDashboard:
+    """Usage of the account: today, this month, history, languages and per-key breakdown."""
+    period: str
+    tier: str
+    today: Dict[str, Any]
+    month: Dict[str, Any]
+    total_transcriptions: int
+    history: List[Dict[str, Any]] = field(default_factory=list)
+    last_7_days: List[Dict[str, Any]] = field(default_factory=list)
+    languages: Dict[str, Any] = field(default_factory=dict)
+    by_key: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class FolderItem:
+    """Outcome for one file of a folder transcription."""
+    path: str
+    status: str                       # "success" | "error" | "skipped"
+    output_path: Optional[str] = None
+    result: Optional[TranscriptionResult] = None
+    error: Optional[str] = None
