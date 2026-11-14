@@ -24,6 +24,14 @@ mistake by publishing the next number (`2.0.1`), never by editing a published on
    features, `3.0.0` for breaking changes.
 2. **Bump it in both places** and keep them equal: `lexiafrik/__init__.py` (`__version__`) and `setup.py` (`version`).
 3. **Update `CHANGELOG.md`** (and the documentation site if the API surface changed).
+   For the documentation site (repository `lexiafrik-web`, app `apps/docs`):
+   add the version to `lib/sdk-versions.ts`, copy the previous guide to `app/(docs)/sdk/<version>/page.mdx` and
+   update it, then generate the complete reference **from this version's code**:
+   ```bash
+   python apps/docs/scripts/gen_sdk_reference.py --sdk-dir ../lexiafrik-python --version X.Y        --released "14 novembre 2026" --out "apps/docs/app/(docs)/sdk/X.Y/reference/page.mdx"
+   ```
+   Every function, argument, default, return type, model, exception and command line option comes from the code,
+   so the page cannot drift from the package. Older versions stay available through the version selector.
 4. **Check locally:**
    ```bash
    python -m pip install build twine pytest httpx websockets
